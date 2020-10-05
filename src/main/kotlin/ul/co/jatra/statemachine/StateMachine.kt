@@ -7,8 +7,108 @@ import kotlinx.coroutines.channels.Channel.Factory.UNLIMITED
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ul.co.jatra.statemachine.Event.*
-import ul.co.jatra.statemachine.State.Companion.Terminal
-import ul.co.jatra.statemachine.State.Companion.stateMachine
+import ul.co.jatra.statemachine.State.Companion.state
+import ul.co.jatra.statemachine.StateMachine.Companion.stateMachine
+
+
+
+data class State<E>(
+    //For debug
+    var name: String,
+    //suspending function to execute on entry to this state
+    var onEntry: (suspend () -> Unit)? = null,
+    //suspending function to execute on exit
+    var onExit: (suspend () -> Unit)? = null,
+    //suspending function to handle any events that occur when in this state.
+    var onEvent: (suspend (Event) -> State<E>?)? = null) {
+
+    suspend fun transition(event: Event): State<E> {
+        val nextState = onEvent?.let { it(event) }
+        var state: State<E>? = this
+        nextState?.let {next ->
+            onExit?.let { it() }
+            state = next
+            next.onEntry?.let { it() }
+        }
+//        if (nextState != null) {
+//            onExit?.let { it() }
+//            state = nextState
+//            state.onEntry?.let { it() }
+//        }
+        return state ?: this
+    }
+
+    companion object {
+        class StateBuilder<E> {
+            private var name: String = ""
+            private var onEntry: suspend () -> Unit = {}
+            private var onExit: suspend () -> Unit = {}
+            private var onEvent: suspend (Event) -> State<E>? = { null }
+
+            fun name(name: () -> String) {
+                this.name = name()
+            }
+
+            fun onEntry(onEntry: suspend () -> Unit) {
+                this.onEntry = onEntry
+            }
+
+            fun onExit(onExit: suspend () -> Unit) {
+                this.onExit = onExit
+            }
+
+            //Return null for no action
+            //Return this state to re-enter, and so re-run the onEntry
+            //Return a different state to run 1/ the onExit, then the onEntry of next state.
+            fun onEvent(onEvent: suspend (Event) -> State<E>?) {
+                this.onEvent = onEvent
+            }
+
+            fun build() = State(name, onEntry, onExit, onEvent)
+        }
+
+        fun <E> state(lambda: StateBuilder<E>.() -> Unit) =
+                StateBuilder<E>()
+                        .apply(lambda)
+                        .build()
+
+    }
+}
+
+
+class StateMachine<E>(var startingState: State<E>, var endState: State<E>, var channel: Channel<Event>) {
+    suspend fun start() {
+        var state = startingState
+        while (state != endState) {
+            state = state.transition(channel.receive())
+            println("Current state: ${state.name}")
+        }
+    }
+    companion object {
+        class StateMachineBuilder<E> {
+            private lateinit var startState: State<E>
+            private lateinit var endState: State<E>
+            private lateinit var channel: Channel<Event>
+
+            fun startState(startState: () -> State<E>) {
+                this.startState = startState()
+            }
+            fun endState(endState: () -> State<E>) {
+                this.endState = endState()
+            }
+            fun channel(channel: () -> Channel<Event>) {
+                this.channel = channel()
+            }
+
+            fun build() = StateMachine(startState, endState, channel)
+        }
+
+        fun <E>stateMachine(lambda: StateMachineBuilder<E>.() -> Unit) =
+                StateMachineBuilder<E>()
+                        .apply(lambda)
+                        .build()
+    }
+}
 
 
 sealed class Event {
@@ -18,121 +118,27 @@ sealed class Event {
     object AcceptedTerms : Event()
     object AcceptedConditions : Event()
     object Finish : Event()
+    object Bogus: Event()
 }
 
-
-data class State(
-    //For debug
-    var name: String,
-    //suspending function to execute on entry to this state
-    var onEntry: (suspend () -> Unit)? = null,
-    //suspending funtion to execute on exit
-    var onExit: (suspend () -> Unit)? = null,
-    //suspending funtion to handle any events that occur when in this state.
-    var onEvent: (suspend (Event) -> State?)? = null) {
-
-    suspend fun transition(event: Event): State {
-        val nextState = onEvent?.let { it(event) }
-        var state: State? = this
-        if (nextState != state) {
-            state?.onExit?.let { it() }
-            state = nextState
-            state?.onEntry?.let { it() }
-        }
-        return state ?: this
-    }
-
-    companion object {
-        suspend fun stateMachine(startingState: State, channel: Channel<Event>) {
-            var state = startingState
-            while (state != Terminal) {
-                state = state.transition(channel.receive())
-                println("Current state: ${state.name}")
-            }
-        }
-        val Terminal = State("terminal")
-    }
-}
-
-class StateMachine(var startingState: State, var channel: Channel<Event>) {
-    suspend fun start() {
-        var state = startingState
-        while (state != Terminal) {
-            state = state.transition(channel.receive())
-            println("Current state: ${state.name}")
-        }
-    }
-    companion object {
-        val Terminal = State("terminal")
-    }
-}
-
-class StateMachineBuilder {
-    private lateinit var startState: State
-    private lateinit var channel: Channel<Event>
-
-    fun startState(startState: State) {
-        this.startState = startState
-    }
-    fun channel(channel: Channel<Event>) {
-        this.channel = channel
-    }
-
-    fun build() = StateMachine(startState, channel)
-}
-
-class StateBuilder {
-    private var name: String = ""
-    private var onEntry: suspend () -> Unit = {}
-    private var onExit: suspend () -> Unit = {}
-    private var onEvent: suspend (Event) -> State? = { null }
-
-    fun name(name: () -> String) {
-        this.name = name()
-    }
-
-    fun onEntry(onEntry: suspend () -> Unit) {
-        this.onEntry = onEntry
-    }
-
-    fun onExit(onExit: suspend () -> Unit) {
-        this.onExit = onExit
-    }
-
-    //Return null for no action
-    //Return this state to re-enter, and so re-run the onEntry
-    //Return a different state to run 1/ the onExit, then the onEntry of next state.
-    fun onEvent(onEvent: suspend (Event) -> State?) {
-        this.onEvent = onEvent
-    }
-
-    fun build() = State(name, onEntry, onExit, onEvent)
-}
-
-fun state(lambda: StateBuilder.() -> Unit) =
-    StateBuilder()
-        .apply(lambda)
-        .build()
-
-fun stateMachine(lambda: StateMachineBuilder.() -> Unit) =
-    StateMachineBuilder()
-        .apply(lambda)
-        .build()
 
 suspend fun main() {
-    lateinit var state1: State
-    lateinit var state2: State
+    lateinit var state1: State<Event>
+    lateinit var state2: State<Event>
+    val terminal: State<Event> = state {
+        name { "terminal"}
+    }
 
     state1 = state {
         name { "State1" }
         onEntry {
-            println(">onEntry state1")
+            println("      state1>onEntry ")
         }
         onExit {
-            println(">onExit state1")
+            println("      state1>onExit ")
         }
         onEvent {
-            println(">onEvent $it state1")
+            println("    state1>onEvent[$it] ")
             //using a when means
             //  1/ compiler will warn if events are missed
             //  2/ all events have to be handled in the satte, even if they are not relevant
@@ -141,6 +147,7 @@ suspend fun main() {
                 is Authenticated -> state2
                 is AcceptedTerms -> state2
                 is AcceptedConditions -> state2
+                is Finish -> terminal
                 else -> null
             }
         }
@@ -148,17 +155,17 @@ suspend fun main() {
     state2 = state {
         name { "State2" }
         onEntry {
-            println(">onEntry state2")
+            println("      state2>onEntry ")
             delay(200)
         }
         onExit {
-            println(">onExit state2")
+            println("      state2>onExit ")
         }
         onEvent {
-            println(">onEvent $it state2")
+            println("    state2>onEvent[$it] ")
             when (it) {
                 is AuthFailed -> state1
-                is Finish -> Terminal
+                is Finish -> terminal
                 else -> null
             }
         }
@@ -168,11 +175,14 @@ suspend fun main() {
 
     val channel = Channel<Event>(UNLIMITED)
 
-
     println("Start state: ${startingState.name}")
 
     val eventLoop = CoroutineScope(Dispatchers.Default).launch {
-        stateMachine(startingState, channel)
+        stateMachine<Event> {
+            startState { startingState }
+            endState { terminal }
+            channel { channel }
+        }.start()
     }
 
     channel.offer(Authenticated)
@@ -183,7 +193,14 @@ suspend fun main() {
     delay(1000)
     channel.offer(AcceptedTerms)
     delay(1000)
+    channel.offer(AuthFailed)
+    delay(1000)
+    channel.offer(Authenticated)
+    delay(1000)
     channel.offer(Finish)
+//    channel.offer(Bogus)
+//    delay(1000)
+//    channel.offer(Finish)
 
     eventLoop.join()
 }
